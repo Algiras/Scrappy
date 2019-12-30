@@ -1,8 +1,8 @@
 package algimk
 
 import algimk.FakeServer._
-import algimk.Scrappy.{Firefox, ScrappyFn}
-import algimk.config.{Config, Drivers}
+import algimk.Scrappy.{ScrappyDriver, ScrappyFn}
+import algimk.config.{Config, DriverConfig, ProxyConfig}
 import cats.data.Kleisli
 import cats.effect.{ContextShift, IO, Resource, Timer}
 import org.http4s.Uri
@@ -41,9 +41,12 @@ trait FakeServerContext {
 object FakeServer {
   case class ServerApi(url: Uri)
 
-  def driverLocations: Resource[IO, Drivers] = Resource.liftF(loadConfigF[IO, Config].map(_.drivers))
+  def driverLocations: Resource[IO, (List[DriverConfig], List[ProxyConfig])] = Resource.liftF(for {
+    config <- loadConfigF[IO, Config]
+    proxies <- ScrappyQueue.readProxies(config.proxyConfigFileName)
+  } yield (config.browserDrivers, proxies))
 
-  val defaultDriver: Resource[IO, WebDriver] = driverLocations.flatMap(drv => Scrappy.driver(Firefox(drv.firefox)))
+  val defaultDriver: Resource[IO, WebDriver] = driverLocations.flatMap(drv => Scrappy.driver(drv._1.flatMap(cnf => ScrappyDriver(cnf, drv._2).toList).head))
 
   def loadFileResource(fileName: String) = IO(Source.fromResource(s"testPages/$fileName").getLines.mkString)
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Scrappy is a service to store historical web data
+
+[Service]
+WorkingDirectory=/opt/prod
+ExecStart=/usr/bin/java -Xms128m -Xmx256m -jar /opt/prod/scrappy-assembly-0.0.1-SNAPSHOT.jar
+EnvironmentFile=/etc/scrappy/scrappy.conf
+User=appManager
+Type=simple
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

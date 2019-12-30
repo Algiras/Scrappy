@@ -14,7 +14,7 @@ scalacOptions ++= Seq(
   "-Xlint",                // enable handy linter warnings
   "-Xfatal-warnings",      // turn compiler warnings into errors
   "-Ypartial-unification", // allow the compiler to unify type constructors of different arities,
-  "-Yrangepos"             //      Use range positions for syntax trees.
+  "-Yrangepos"             // Use range positions for syntax trees.
 )
 
 libraryDependencies ++= Seq(
@@ -37,16 +37,21 @@ libraryDependencies ++= Seq(
   "com.pepegar" %% "hammock-circe" % "0.10.0",
   "com.pepegar" %% "hammock-apache-http" % "0.10.0",
 
-  "io.circe" %% "circe-core" % "0.12.3",
-  "io.circe" %% "circe-generic" % "0.12.3",
-  "io.circe" %% "circe-parser" % "0.12.3",
+  "io.circe" %% "circe-core" % "0.12.2",
+  "io.circe" %% "circe-generic" % "0.12.2",
+  "io.circe" %% "circe-parser" % "0.12.2",
+  "io.circe" % "circe-generic-extras_2.12" % "0.12.2",
 
   "org.http4s" %% "http4s-dsl" % "0.20.8",
   "org.http4s" %% "http4s-circe" % "0.20.8",
   "org.http4s" %% "http4s-blaze-server" % "0.20.8",
 
-  "org.specs2" %% "specs2-core" % "4.6.0" % "test"
+  "org.specs2" %% "specs2-core" % "4.6.0" % "test",
+  "org.mockito" % "mockito-core" % "3.2.4" % "test"
 )
 
 addCompilerPlugin("org.spire-math" %% "kind-projector" % "0.9.3")
-addCompilerPlugin("org.scalamacros" % "paradise" % "2.1.0" cross CrossVersion.full)
+addCompilerPlugin(
+  "org.scalamacros" % "paradise" % "2.1.1" cross CrossVersion.full
+)
+

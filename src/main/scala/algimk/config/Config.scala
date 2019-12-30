@@ -2,13 +2,19 @@ package algimk.config
 
 case class HttpConfig(port: Int)
 
-case class Drivers(firefox: String)
+sealed trait DriverConfig {
+  def driverLocation: String
+}
 
-case class QueueBounds(linkQueueBound: Int, parseQueueBound: Int)
+final case class FirefoxConfig(driverLocation: String) extends DriverConfig
+final case class ChromeConfig(driverLocation: String) extends DriverConfig
 
-case class Config(http: HttpConfig,
+final case class QueueBounds(linkQueueBound: Int, parseQueueBound: Int)
+
+final case class Config(http: HttpConfig,
                   subscribers: List[String],
                   storeDirectory: String,
                   token: Option[String],
-                  drivers: Drivers,
-                  queueBounds: QueueBounds)
+                  browserDrivers: List[DriverConfig],
+                  queueBounds: QueueBounds,
+                  proxyConfigFileName: Option[String])

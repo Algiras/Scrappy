@@ -1,24 +1,88 @@
 package algimk
 
-import cats.data.Kleisli
+import algimk.config._
+import cats.data.{Kleisli, NonEmptyList}
 import cats.effect.{IO, Resource}
-import org.openqa.selenium.{By, WebDriver, WebElement}
+import org.openqa.selenium.Proxy.ProxyType
+import org.openqa.selenium.chrome.{ChromeDriver, ChromeOptions}
 import org.openqa.selenium.firefox.{FirefoxDriver, FirefoxOptions}
+import org.openqa.selenium.{By, Proxy, WebDriver, WebElement}
 
 import scala.collection.JavaConverters._
 
 object Scrappy {
+  sealed trait ScrappyProxy {
+    def proxy: Proxy
+  }
+
+  object ScrappyProxy {
+    def apply(conf: ProxyConfig): ScrappyProxy = new ScrappyProxy {
+      override def proxy: Proxy = {
+        val proxy = new Proxy()
+
+        proxy.setAutodetect(false)
+        proxy.setProxyType(ProxyType.MANUAL)
+
+        conf match {
+          case FTPProxy(url) => proxy.setFtpProxy(url)
+          case SSLProxy(url) => proxy.setSslProxy(url)
+          case HttpProxy(url) => proxy.setHttpProxy(url)
+          case Socks4Proxy(url) =>
+            proxy.setSocksProxy(url)
+            proxy.setSocksVersion(4)
+          case Socks5Proxy(url) =>
+            proxy.setSocksProxy(url)
+            proxy.setSocksVersion(5)
+          case AutoConfigProxy(url) => proxy.setProxyAutoconfigUrl(url)
+        }
+
+        proxy
+      }
+    }
+  }
+
   sealed trait ScrappyDriver {
     def driver: WebDriver
   }
 
-  case class Firefox(driverSource: String) extends ScrappyDriver {
+  object ScrappyDriver {
+    def apply(config: DriverConfig, proxies: List[ProxyConfig]): NonEmptyList[ScrappyDriver] = {
+      def buildWithProxies(build: Option[ScrappyProxy] => ScrappyDriver): NonEmptyList[ScrappyDriver] = {
+        NonEmptyList.fromList(proxies).map(prxs => {
+          prxs.map(ScrappyProxy.apply).map(Some(_)).map(build)
+        }).getOrElse(NonEmptyList.one(build(None)))
+      }
+
+      config match {
+        case FirefoxConfig(path) => buildWithProxies(Firefox(path, _))
+        case ChromeConfig(path) => buildWithProxies(Chrome(path, _))
+      }
+    }
+  }
+
+  private case class Firefox(driverSource: String, proxy: Option[ScrappyProxy]) extends ScrappyDriver {
     override def driver: WebDriver = {
       System.setProperty("webdriver.gecko.driver", driverSource)
       val options: FirefoxOptions = new FirefoxOptions()
       options.setHeadless(true)
+      proxy.foreach(scrappyProxy => {
+        options.setProxy(scrappyProxy.proxy)
+      })
 
       new FirefoxDriver(options)
+    }
+  }
+
+  private case class Chrome(driverSource: String, proxy: Option[ScrappyProxy]) extends ScrappyDriver {
+    override def driver: WebDriver = {
+      System.setProperty("webdriver.chrome.driver", driverSource)
+      val options: ChromeOptions = new ChromeOptions()
+      options.setHeadless(true)
+      proxy.foreach(scrappyProxy => {
+        options.setProxy(scrappyProxy.proxy)
+      })
+
+      new ChromeDriver(options)
     }
   }
 
