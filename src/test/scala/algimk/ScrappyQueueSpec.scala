@@ -4,6 +4,7 @@ import java.io.{BufferedReader, File, FileReader}
 
 import algimk.Scrappy.ScrappyDriver
 import algimk.ScrappyQueue.{EnqueueRequest, _}
+import cats.effect.concurrent.Ref
 import cats.effect.{ContextShift, IO, Resource, Timer}
 import cats.implicits._
 import fs2.Stream
@@ -46,10 +47,9 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
       testCase.use(_ => IO.unit).unsafeRunSync()
     }
 
-
-    // this will fail if proxies.json is empty
+    // this will fail if proxies.json is empty or proxies are no longer available
     "use proxies when specified" in new Context {
-      val testCase = for {
+      val testCase: Resource[IO, MatchResult[String]] = for {
         drv <- defaultDrivers
         requestRes <- contentOf("https://ipecho.net/plain")
         urlQueue <- testQueue[EnqueueRequest]
@@ -57,7 +57,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         srv = testServer(urlQueue, parseQueue, List.empty, storeDirectory, drv)
         server <- srv._2.resource
         _ <- request(server.baseUri.renderString, EnqueueRequest("https://ipecho.net/plain", None))
-        scrapeResult <- waitForFirstEntryInStream(srv._1, 10000.milliseconds).map(_.left.get)
+        scrapeResult <- waitForFirstEntryInStream(srv._1, 100000.milliseconds).map(_.left.get)
       } yield scrapeResult.html must not(contain(requestRes))
 
       testCase.use(_ => IO.unit).unsafeRunSync()
@@ -96,12 +96,61 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         drv <- defaultDrivers
         urlQueue <- testQueue[EnqueueRequest]
         parseQueue <- testQueue[EnqueueScrapeResult]
-        stream = consumeLinkStreamAndProduceParseStream(urlQueue, parseQueue, drv)
+        stream = consumeLinkStreamAndProduceParseStream(urlQueue, parseQueue, drv, (_, _) => IO.unit)
         urlToScrape <- FakeServer.givenFakeServer.map(srv => srv.url.renderString ++ "index.html")
         _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRequest(urlToScrape, None)))
         res <- waitForFirstEntryInStream(stream, 200000.milliseconds)
         _ <- matchesIndexContent(res.html)
         _ <- deleteRecordedFiles()
+      } yield ()
+
+      testCase.use(_ => IO.unit).unsafeRunSync()
+    }
+
+    "consider empty page to be a scrape failure" in new Context {
+      val testCase: Resource[IO, Unit] = for {
+        drv <- defaultDrivers
+        urlQueue <- testQueue[EnqueueRequest]
+        parseQueue <- testQueue[EnqueueScrapeResult]
+        stream = consumeLinkStreamAndProduceParseStream(urlQueue, parseQueue, drv, (_, _) => IO.unit)
+        urlToScrape <- FakeServer.givenFakeServer.map(srv => srv.url.renderString ++ "empty.html")
+        _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRequest(urlToScrape, None)))
+        res <- waitForFirstEntryInStream(stream, 10000.milliseconds).attempt
+        _ <- Resource.liftF(IO(res must beLeft))
+      } yield ()
+
+      testCase.use(_ => IO.unit).unsafeRunSync()
+    }
+
+    "on scrape failure report error and continue working" in new Context {
+      val testCase: Resource[IO, Unit] = for {
+        drv <- defaultDrivers
+        urlQueue <- testQueue[EnqueueRequest]
+        parseQueue <- testQueue[EnqueueScrapeResult]
+        ref <- Resource.liftF(Ref.of[IO, Either[String, Throwable]](Left("Was not called")))
+        stream = consumeLinkStreamAndProduceParseStream(urlQueue, parseQueue, drv, (error, _) => ref.set(Right(error)))
+        _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRequest("https://127.0.0.1", None)))
+        res <- waitForFirstEntryInStream(stream, 10000.milliseconds).attempt
+        err <- Resource.liftF(ref.get)
+        _ <- Resource.liftF(IO(err must beRight))
+        _ <- Resource.liftF(IO(res must beLeft))
+      } yield ()
+
+      testCase.use(_ => IO.unit).unsafeRunSync()
+    }
+
+    "on scrape failure" in new Context {
+      val testCase: Resource[IO, Unit] = for {
+        drv <- defaultDrivers
+        urlQueue <- testQueue[EnqueueRequest]
+        parseQueue <- testQueue[EnqueueScrapeResult]
+        ref <- Resource.liftF(Ref.of[IO, Either[String, Throwable]](Left("Was not called")))
+        stream = consumeLinkStreamAndProduceParseStream(urlQueue, parseQueue, drv, (error, _) => ref.set(Right(error)))
+        _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRequest("https://127.0.0.1", None)))
+        res <- waitForFirstEntryInStream(stream, 10000.milliseconds).attempt
+        err <- Resource.liftF(ref.get)
+        _ <- Resource.liftF(IO(err must beRight))
+        _ <- Resource.liftF(IO(res must beLeft))
       } yield ()
 
       testCase.use(_ => IO.unit).unsafeRunSync()
@@ -216,7 +265,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
     }
 
     def matchesIndexContent(scrapQueueHead: String): Resource[IO, MatchResult[String]] = {
-      Resource.liftF(IO(scrapQueueHead must (contain("Sample") and contain("<html>") and contain("</html>") and contain("</body>") and contain("<body>"))))
+      Resource.liftF(IO(scrapQueueHead must (contain("Sample") and contain("<html lang=\"en\">") and contain("</html>") and contain("</body>") and contain("<body>"))))
     }
 
     def waitForFirstEntryInStream[T](stream: Stream[IO, T], waitFor: FiniteDuration): Resource[IO, T] = raceWithTimeOut(
@@ -233,7 +282,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
                    storeDirectory: String,
                    scrappyDriver: List[ScrappyDriver],
                    token: Option[String] = None): (Stream[IO, Either[EnqueueScrapeResult, List[HttpResponse]]], BlazeServerBuilder[IO]) =
-      (combineLinkAndParseStreams(linkQueue, parseQueue, List.empty, storeDirectory, scrappyDriver), server(linkQueue, serverToken = token))
+      (combineLinkAndParseStreams(linkQueue, parseQueue, List.empty, storeDirectory, scrappyDriver, (_, _) => IO.unit), server(linkQueue, serverToken = token))
 
     def raceWithTimeOut[A](actionToRace: IO[A], maxDuration: FiniteDuration): Resource[IO, A] = Resource.liftF[IO, A](
       IO.race(

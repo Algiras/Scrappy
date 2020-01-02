@@ -22,7 +22,10 @@ libraryDependencies ++= Seq(
   "org.seleniumhq.selenium" % "selenium-firefox-driver" % "3.141.59",
   "ch.qos.logback"  %  "logback-classic"  % "1.2.3",
 
-  "com.github.pureconfig" %% "pureconfig"             % "0.12.2",
+  "io.chrisdavenport" %% "log4cats-core" % "1.0.1",
+  "io.chrisdavenport" %% "log4cats-slf4j" % "1.0.1",
+
+"com.github.pureconfig" %% "pureconfig"             % "0.12.2",
   "com.github.pureconfig" %% "pureconfig-cats-effect" % "0.12.2",
   "com.github.pureconfig" %% "pureconfig-generic"     % "0.12.2",
 

@@ -23,7 +23,7 @@ import org.http4s.{EntityDecoder, EntityEncoder, HttpRoutes, Response, Status}
 import org.joda.time.DateTime
 import pureconfig.generic.auto._
 import pureconfig.module.catseffect._
-
+import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import scala.concurrent.duration._
 import scala.io.Source
 
@@ -56,6 +56,7 @@ object ScrappyQueue extends IOApp {
 
   override def run(args: List[String]): IO[ExitCode] = for {
     config <- loadConfigF[IO, Config]
+    logger <- Slf4jLogger.create[IO]
     proxies <- readProxies(config.proxyConfigFileName)
     linkQueue <- Queue.bounded[IO, EnqueueRequest](config.queueBounds.linkQueueBound)
     parseQueue <- Queue.bounded[IO, EnqueueScrapeResult](config.queueBounds.parseQueueBound)
@@ -66,7 +67,8 @@ object ScrappyQueue extends IOApp {
       parseQueue,
       config.subscribers,
       config.storeDirectory,
-      config.browserDrivers.flatMap(ScrappyDriver(_, proxies).toList)
+      config.browserDrivers.flatMap(ScrappyDriver(_, proxies).toList),
+      (error, msg) => logger.error(error)(msg)
     )
     exitCode <- Stream(
       configuredServer.serve,
@@ -107,28 +109,42 @@ object ScrappyQueue extends IOApp {
                                  parseQueue: Queue[IO, EnqueueScrapeResult],
                                  recorderUrls: List[String],
                                  storeDirectory: String,
-                                 scrappyDrivers: List[ScrappyDriver]): Stream[IO, Either[EnqueueScrapeResult, List[HttpResponse]]] = {
+                                 scrappyDrivers: List[ScrappyDriver],
+                                 errorReporter: (Throwable, String) => IO[Unit]): Stream[IO, Either[EnqueueScrapeResult, List[HttpResponse]]] = {
     Stream(
-      consumeLinkStreamAndProduceParseStream(linkQueue, parseQueue, scrappyDrivers).map(Left(_)),
+      consumeLinkStreamAndProduceParseStream(linkQueue, parseQueue, scrappyDrivers, errorReporter).map(Left(_)),
       consumeParseStream(parseQueue, recorderUrls, storeDirectory).map(Right(_))
     ).parJoin(2)
   }
 
   private[algimk] def consumeLinkStreamAndProduceParseStream(linkQueue: Queue[IO, EnqueueRequest],
                                                              parseQueue: Queue[IO, EnqueueScrapeResult],
-                                                             scrappyDrivers: List[ScrappyDriver]): Stream[IO, EnqueueScrapeResult] = {
+                                                             scrappyDrivers: List[ScrappyDriver],
+                                                             reportError: (Throwable, String) => IO[Unit]): Stream[IO, EnqueueScrapeResult] = {
     lazy val drivers: Stream[IO, ScrappyDriver] = Stream.emits[IO, ScrappyDriver](scrappyDrivers) ++ drivers
 
     drivers.zip(linkQueue.dequeue).evalMap { case (driver, req) => for {
-      html <- Scrappy.driver(driver).map(driver => (for {
+      htmlE <- Scrappy.driver(driver).map(driver => (for {
         _ <- Scrappy.get(req.url)
-        elm <- Scrappy.gerElementsByCssSelector("html")
-      } yield elm).run(driver)).use(_.map(el => s"<html>${el.head.html}</html>"))
+        elm <- Scrappy.gerElementByCssSelector("html")
+      } yield elm).run(driver)).use(
+        _.flatMap(elOpt => {
+          val element = IO(elOpt.get).onError { case _ => IO.raiseError(new RuntimeException("Element not found")) }
+          val body = element.map(_.getChildren("body").head).attempt.map(
+            _.flatMap(el => Either.cond(el.innerHtml.trim.nonEmpty, (), new RuntimeException("No body found")))
+          )
+
+          body.rethrow.flatMap(_ => element.map(_.html))
+        })
+      ).attempt
       time <- timer.clock.realTime(MILLISECONDS).map(new DateTime(_))
-      result = EnqueueScrapeResult(req, html, time)
-      _ <- parseQueue.enqueue1(result)
+      result = htmlE.map(EnqueueScrapeResult(req, _, time))
+      _ <- result.fold(
+        reportError(_, s"Failure scrapping page ${req.url}").flatMap(_ => linkQueue.enqueue1(req)),
+        parseQueue.enqueue1
+      )
     } yield result
-    }
+    }.collect { case Right(value) => value }
   }
 
   private[algimk] def consumeParseStream(parseQueue: Queue[IO, EnqueueScrapeResult], recorderUrls: List[String], storeDirectory: String): Stream[IO, List[HttpResponse]] = {

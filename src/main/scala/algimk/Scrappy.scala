@@ -90,6 +90,7 @@ object Scrappy {
 
   trait WElement {
     def html: String
+    def innerHtml: String
     def getText: String
     def getAttribute(name: String): Option[String]
     def getChildren(selector: String): List[WElement]
@@ -98,6 +99,7 @@ object Scrappy {
   object WElement {
     def apply(element: WebElement): WElement = new WElement {
       override def html: String = element.getAttribute("outerHTML")
+      override def innerHtml: String = element.getAttribute("innerHTML")
       override def getText: String = element.getText
       override def getAttribute(name: String): Option[String] = Option(element.getAttribute(name))
       override def getChildren(selector: String): List[WElement] = element.findElements(By.cssSelector(selector))
@@ -111,9 +113,9 @@ object Scrappy {
 
   def get(url: String): ScrappyFn[WebDriver, Unit] = Kleisli(driver => IO(driver.get(url)))
 
-  def gerElementsByCssSelector(selector: String): ScrappyFn[WebDriver, List[WElement]] =
+  def getElementsByCssSelector(selector: String): ScrappyFn[WebDriver, List[WElement]] =
     Kleisli(driver => IO(driver.findElements(By.cssSelector(selector)).asScala.map(WElement.apply).toList))
 
   def gerElementByCssSelector(selector: String): ScrappyFn[WebDriver, Option[WElement]] =
-    gerElementsByCssSelector(selector).map(_.headOption)
+    getElementsByCssSelector(selector).map(_.headOption)
 }

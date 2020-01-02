@@ -36,6 +36,16 @@ class ScrappySpec(implicit val executionContext: ExecutionContext) extends Spec 
       )
     }
 
+    "read all inner html" in new Context {
+      def trimContent(content: String): String = content.trim.filterNot(_ == '\n')
+
+      runTest((baseUri: Uri) => for {
+        _ <- indexPage(baseUri)
+        elem <- Scrappy.gerElementByCssSelector("body")
+      } yield elem.map(el => trimContent(el.innerHtml)) must beSome("Sample")
+      )
+    }
+
     "read children of an element by selector" in new Context {
       runTest((baseUri: Uri) => for {
         _ <- pagedPage(baseUri)

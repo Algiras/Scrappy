@@ -38,6 +38,7 @@ For setup you will need to:
             - `chmod +x geckodriver`
 - Install nginx and add `nginx` configuration based on `scrappy.service` config
  - `apt install nginx`
+ - if you have `ufw` - `sudo ufw allow 'Nginx HTTP'`
  - add `nginx` file as `default` to `/etc/nginx/sites-available` (as default if it's the only config you will need)
 - Add `proxies.json` and `scrappy.conf` to `etc/scrappy`. Configure them before:
  - It's important to note that you need to set `TOKEN` so you can access the API
