@@ -1,0 +1,51 @@
+# Setup
+
+For setup you will need to:
+
+- Create `jvmapps` group `sudo groupadd jvmapps`
+- Create user `sudo useradd -m appManager -G jvmapps`, `usermod -aG sudo appManager`
+ - optionally you can give `appManager` a password `passwd appManager`(not recommended, but sometime useful)   
+ - add `.ssh` key 
+    - add `.ssh` using created user - `su - appManager` ,`mkdir ~/.ssh`, `chmod 700 ~/.ssh`, `touch .ssh/authorized_keys`, `chmod 600 .ssh/authorized_keys`, paste your pub key to `authorized_keys` file
+    - OR
+    - `rsync --archive --chown=appManager:appManager ~/.ssh /home/sammy`
+- Add directories with permissions for `appManager`: 
+ - `/history` - read/write
+ - `/webdriver/` - read/execute
+ - `/etc/scrappy` - read
+    - add `proxies.json` and `scrappy.conf` files here, after configuring them
+ - `/opt/prod/` - read/execute
+ - update all specified directories to be owned by `jvmapps` group and `appManager` user
+    - `chown -R appManager:jvmapps directory`
+- Add firefox and chrome and their drivers to `/webdriver/`
+    - Chrome
+        - `wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -`
+        - `echo 'deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main' | sudo tee /etc/apt/sources.list.d/google-chrome.list`
+        - `sudo apt-get update`
+        - `sudo apt-get install google-chrome-stable`
+        - Chrome driver matching version
+            - `apt install unzip`
+            - `wget https://chromedriver.storage.googleapis.com/80.0.3987.16/chromedriver_linux64.zip`
+            - `unzip chromedriver_linux64.zip`
+            - `rm chromedriver_linux64.zip`
+            - `chmod +x chromedriver`
+    - Firefox
+        - `apt install firefox`
+        - Firefox matching version
+            - `wget https://github.com/mozilla/geckodriver/releases/download/v0.26.0/geckodriver-v0.26.0-linux64.tar.gz`
+            - `tar -xf geckodriver-v0.26.0-linux64.tar.gz`
+            - `rm geckodriver-v0.26.0-linux64.tar.gz`
+            - `chmod +x geckodriver`
+- Install nginx and add `nginx` configuration based on `scrappy.service` config
+ - `apt install nginx`
+ - add `nginx` file as `default` to `/etc/nginx/sites-available` (as default if it's the only config you will need)
+- Add `proxies.json` and `scrappy.conf` to `etc/scrappy`. Configure them before:
+ - It's important to note that you need to set `TOKEN` so you can access the API
+- Add `scrappy.service` to `/etc/systemd/system` and reload service `systemctl daemon-reload`
+    - logs - `journalctl -u scrappy.service`
+    - start - `sudo systemctl start scrappy`
+    - restart - `sudo systemctl restart scrappy`
+    - automatic startup after restart - `sudo systemctl enable scrappy.service`
+- Install `java` - `apt install openjdk-8-jre-headless`
+- Run `deploy.sh` with preset `SCRAPPY_DEPLOY_SERVER` env variable pointing to your server
+   

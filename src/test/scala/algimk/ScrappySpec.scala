@@ -1,5 +1,6 @@
 package algimk
 
+import algimk.Scrappy.ScrappyFn
 import cats.data.Kleisli
 import cats.effect.{ContextShift, IO, Timer}
 import cats.implicits._
@@ -77,9 +78,9 @@ class ScrappySpec(implicit val executionContext: ExecutionContext) extends Spec 
   }
 
   trait Context extends Scope {
-    def indexPage(baseUri: Uri) = Scrappy.get(baseUri.renderString + "index.html")
-    def pagedPage(baseUri: Uri) = Scrappy.get(baseUri.renderString + "paged.html")
-    def queuePage(baseUri: Uri) = Scrappy.get(baseUri.renderString + "queue/1.html")
+    def indexPage(baseUri: Uri): ScrappyFn[WebDriver, Unit] = Scrappy.get(baseUri.renderString + "index.html")
+    def pagedPage(baseUri: Uri): ScrappyFn[WebDriver, Unit] = Scrappy.get(baseUri.renderString + "paged.html")
+    def queuePage(baseUri: Uri): ScrappyFn[WebDriver, Unit] = Scrappy.get(baseUri.renderString + "queue/1.html")
   }
 
 }

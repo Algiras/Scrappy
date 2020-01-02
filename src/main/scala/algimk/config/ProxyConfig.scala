@@ -13,5 +13,5 @@ final case class Socks5Proxy(url: String) extends ProxyConfig
 
 object ProxyConfig {
   implicit val decodeProxyConfig: Decoder[ProxyConfig] = deriveDecoder[ProxyConfig]
-  implicit val encodeProxyConfig: Encoder.AsObject[ProxyConfig] = deriveEncoder[ProxyConfig]
+  implicit val encodeProxyConfig: Encoder[ProxyConfig] = deriveEncoder[ProxyConfig]
 }
