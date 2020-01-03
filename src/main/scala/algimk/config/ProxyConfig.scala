@@ -1,10 +1,13 @@
 package algimk.config
 
-import cats.effect.IO
-import hammock.InterpTrans
-import hammock.asynchttpclient.AsyncHttpClientInterpreter
+import algimk.FileSystem
+import cats.effect.{Blocker, ContextShift, IO, Resource}
+import cats.implicits._
 import io.circe.generic.semiauto._
 import io.circe.{Decoder, Encoder}
+import org.http4s.client.blaze.BlazeClientBuilder
+import org.http4s.implicits._
+import io.circe.parser.decode
 
 sealed trait ProxyConfig
 
@@ -16,26 +19,23 @@ final case class Socks4Proxy(url: String) extends ProxyConfig
 final case class Socks5Proxy(url: String) extends ProxyConfig
 
 object ProxyConfig {
-  implicit val interpreter: InterpTrans[IO] = AsyncHttpClientInterpreter.instance[IO]
   implicit val decodeProxyConfig: Decoder[ProxyConfig] = deriveDecoder[ProxyConfig]
   implicit val encodeProxyConfig: Encoder[ProxyConfig] = deriveEncoder[ProxyConfig]
 
-  def getProxies: IO[List[ProxyConfig]] = {
-    import hammock._
+  def readProxies(fileNameOpt: Option[String]): IO[List[ProxyConfig]] = fileNameOpt.map(fileName =>
+    FileSystem.readFile(fileName).map(content => decode[List[ProxyConfig]](content)).rethrow
+  ).getOrElse(IO(List.empty[ProxyConfig]))
 
-    Hammock.request(Method.GET, uri"https://api.proxyscrape.com/".params(List(
-      "request" -> "getproxies",
-      "proxytype" -> "http",
-      "timeout" -> "500",
-      "country" -> "all",
-      "ssl" -> "yes",
-      "anonymity" -> "elite"
-    ): _*),
-      Map.empty,
-    ).exec[IO].map(_.entity.cata[String](
-      _.content.toString(),
-      ctx => new String(ctx.content),
-      _ => ""
-    )).map(_.split("\r\n").map(SSLProxy).toList)
+  def getProxyScrapeProxies(implicit ctxS: ContextShift[IO]): IO[List[SSLProxy]] = {
+    Blocker[IO].use(blocker =>
+      BlazeClientBuilder[IO](blocker.blockingContext).resource.flatMap(client => Resource.liftF(client.expect[String](
+        uri"https://api.proxyscrape.com/"
+          .withQueryParam("request", "getproxies")
+          .withQueryParam("proxytype", "http")
+          .withQueryParam("timeout", "500")
+          .withQueryParam("country", "all")
+          .withQueryParam("ssl", "yes")
+      ))).use(res => IO(res.split("\r\n").map(SSLProxy).toList))
+    )
   }
 }

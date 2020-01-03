@@ -66,6 +66,7 @@ object Scrappy {
       System.setProperty("webdriver.gecko.driver", driverSource)
       val options: FirefoxOptions = new FirefoxOptions()
       options.setHeadless(true)
+      options.addPreference("network.proxy.allow_hijacking_localhost", true)
       proxy.foreach(scrappyProxy => {
         options.setProxy(scrappyProxy.proxy)
       })

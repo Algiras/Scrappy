@@ -2,13 +2,13 @@ package algimk
 
 import algimk.FakeServer._
 import algimk.Scrappy.{ScrappyDriver, ScrappyFn}
-import algimk.config.{Config, DriverConfig, ProxyConfig}
+import algimk.config.{Config, DriverConfig, HttpProxy, ProxyConfig}
 import cats.data.Kleisli
-import cats.effect.{ContextShift, IO, Resource, Timer}
-import org.http4s.Uri
+import cats.effect.{Blocker, ContextShift, IO, Resource, Timer}
+import org.http4s.client.blaze.BlazeClientBuilder
+import org.http4s.{EntityEncoder, Header, HttpRoutes, Request, Response, Status, Uri}
 import org.http4s.server.blaze.BlazeServerBuilder
 import org.http4s.server.staticcontent.{ResourceService, _}
-import org.http4s.syntax.kleisli._
 import org.openqa.selenium.WebDriver
 import org.specs2.matcher.MatchResult
 import pureconfig.generic.auto._
@@ -18,6 +18,7 @@ import scala.concurrent.ExecutionContext
 import scala.io.Source
 
 trait FakeServerContext {
+  implicit def executionContext: ExecutionContext
   implicit def contextShift: ContextShift[IO]
   implicit def timer: Timer[IO]
 
@@ -43,7 +44,7 @@ object FakeServer {
 
   def driverLocations: IO[(List[DriverConfig], List[ProxyConfig])] = for {
     config <- loadConfigF[IO, Config]
-    proxies <- ScrappyQueue.readProxies(config.proxyConfigFileName)
+    proxies <- ProxyConfig.readProxies(config.proxyConfigFileName)
   } yield (config.browserDrivers, proxies)
 
   val defaultDriver: Resource[IO, WebDriver] = {
@@ -53,9 +54,38 @@ object FakeServer {
   def loadFileResource(fileName: String) = IO(Source.fromResource(s"testPages/$fileName").getLines.mkString)
 
   def givenFakeServer(implicit ctxS: ContextShift[IO], tm: Timer[IO]): Resource[IO, ServerApi] = {
+    import org.http4s.syntax.kleisli._
+
+    for {
+      blocker <- Blocker[IO]
+      server <- BlazeServerBuilder[IO]
+        .bindHttp(0)
+        .withHttpApp(resourceService[IO](ResourceService.Config("/testPages", blocker)).orNotFound)
+        .resource.map(server => ServerApi(server.baseUri))
+    } yield server
+
+  }
+
+
+  def pongServer[T](givenRequest: Request[IO] => T)(implicit w: EntityEncoder[IO, T], ctxS: ContextShift[IO], tm: Timer[IO]): Resource[IO, String] = {
+    import org.http4s.syntax.kleisli._
+
     BlazeServerBuilder[IO]
       .bindHttp(0)
-      .withHttpApp(resourceService[IO](ResourceService.Config("/testPages", ExecutionContext.global)).orNotFound)
-      .resource.map(server => ServerApi(server.baseUri))
+      .withHttpApp(HttpRoutes.of[IO] {
+        case req => IO(Response(Status.Ok).withEntity(givenRequest(req)))
+      }.orNotFound).resource.map(_.baseUri.renderString)
+  }
+
+  def proxy(implicit ctxS: ContextShift[IO], tm: Timer[IO], ex: ExecutionContext): Resource[IO, ProxyConfig] = {
+    import org.http4s.syntax.kleisli._
+
+    for {
+      client <- BlazeClientBuilder[IO](ex).resource
+      server <- BlazeServerBuilder[IO].bindHttp(0).withHttpApp(HttpRoutes.of[IO] {
+        case req =>
+          client.fetch(req.withUri(req.uri).withHeaders(req.headers.put(Header("Host", s"${req.remoteHost.get}:${req.serverPort}"))))(IO.pure)
+      }.orNotFound).resource.map(srv => HttpProxy(s"${srv.baseUri.host.get.value}:${srv.baseUri.port.get}"))
+    } yield server
   }
 }
