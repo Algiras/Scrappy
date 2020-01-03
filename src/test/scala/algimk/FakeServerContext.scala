@@ -41,12 +41,14 @@ trait FakeServerContext {
 object FakeServer {
   case class ServerApi(url: Uri)
 
-  def driverLocations: Resource[IO, (List[DriverConfig], List[ProxyConfig])] = Resource.liftF(for {
+  def driverLocations: IO[(List[DriverConfig], List[ProxyConfig])] = for {
     config <- loadConfigF[IO, Config]
     proxies <- ScrappyQueue.readProxies(config.proxyConfigFileName)
-  } yield (config.browserDrivers, proxies))
+  } yield (config.browserDrivers, proxies)
 
-  val defaultDriver: Resource[IO, WebDriver] = driverLocations.flatMap(drv => Scrappy.driver(drv._1.flatMap(cnf => ScrappyDriver(cnf, drv._2).toList).head))
+  val defaultDriver: Resource[IO, WebDriver] = {
+    Resource.liftF(driverLocations).flatMap(drv => Scrappy.driver(drv._1.map(opt => ScrappyDriver(opt)).head))
+  }
 
   def loadFileResource(fileName: String) = IO(Source.fromResource(s"testPages/$fileName").getLines.mkString)
 

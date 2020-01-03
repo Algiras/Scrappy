@@ -1,7 +1,7 @@
 package algimk
 
 import algimk.config._
-import cats.data.{Kleisli, NonEmptyList}
+import cats.data.Kleisli
 import cats.effect.{IO, Resource}
 import org.openqa.selenium.Proxy.ProxyType
 import org.openqa.selenium.chrome.{ChromeDriver, ChromeOptions}
@@ -46,16 +46,17 @@ object Scrappy {
   }
 
   object ScrappyDriver {
-    def apply(config: DriverConfig, proxies: List[ProxyConfig]): NonEmptyList[ScrappyDriver] = {
-      def buildWithProxies(build: Option[ScrappyProxy] => ScrappyDriver): NonEmptyList[ScrappyDriver] = {
-        NonEmptyList.fromList(proxies).map(prxs => {
-          prxs.map(ScrappyProxy.apply).map(Some(_)).map(build)
-        }).getOrElse(NonEmptyList.one(build(None)))
-      }
-
+    def apply(config: DriverConfig, proxy: ProxyConfig): ScrappyDriver = {
       config match {
-        case FirefoxConfig(path) => buildWithProxies(Firefox(path, _))
-        case ChromeConfig(path) => buildWithProxies(Chrome(path, _))
+        case FirefoxConfig(path) => Firefox(path, Some(ScrappyProxy(proxy)))
+        case ChromeConfig(path) => Chrome(path, Some(ScrappyProxy(proxy)))
+      }
+    }
+
+    def apply(config: DriverConfig): ScrappyDriver = {
+      config match {
+        case FirefoxConfig(path) => Firefox(path, None)
+        case ChromeConfig(path) => Chrome(path, None)
       }
     }
   }

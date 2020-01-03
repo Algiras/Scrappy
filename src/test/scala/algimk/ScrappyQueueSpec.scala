@@ -4,12 +4,13 @@ import java.io.{BufferedReader, File, FileReader}
 
 import algimk.Scrappy.ScrappyDriver
 import algimk.ScrappyQueue.{EnqueueRequest, _}
+import algimk.config.ProxyConfig
 import cats.effect.concurrent.Ref
 import cats.effect.{ContextShift, IO, Resource, Timer}
 import cats.implicits._
 import fs2.Stream
 import fs2.concurrent.{Queue, SignallingRef}
-import hammock.apache.ApacheInterpreter
+import hammock.asynchttpclient.AsyncHttpClientInterpreter
 import hammock.{HttpResponse, InterpTrans}
 import org.http4s.dsl.impl.{QueryParamDecoderMatcher, Root}
 import org.http4s.dsl.io._
@@ -19,17 +20,22 @@ import org.http4s.{HttpRoutes, Response, Status}
 import org.joda.time.DateTime
 import org.specs2.matcher.MatchResult
 import org.specs2.mutable.Spec
-import org.specs2.specification.Scope
+import org.specs2.specification.{BeforeAll, Scope}
 
 import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
 
-class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends Spec {
-
+class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends Spec with BeforeAll{
   implicit val contextShift: ContextShift[IO] = IO.contextShift(executionContext)
   implicit val timer: Timer[IO] = IO.timer(executionContext)
-  implicit val interpreter: InterpTrans[IO] = ApacheInterpreter.instance[IO]
+  implicit val interpreter: InterpTrans[IO] = AsyncHttpClientInterpreter.instance[IO]
+
+  var proxies: List[ProxyConfig] = List.empty[ProxyConfig]
+
+  override def beforeAll(): Unit = {
+    proxies = ProxyConfig.getProxies.unsafeRunSync()
+  }
 
   "ScrappyQueue" should {
     "record a page in scrapping queue" in new Context {
@@ -47,7 +53,6 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
       testCase.use(_ => IO.unit).unsafeRunSync()
     }
 
-    // this will fail if proxies.json is empty or proxies are no longer available
     "use proxies when specified" in new Context {
       val testCase: Resource[IO, MatchResult[String]] = for {
         drv <- defaultDrivers
@@ -57,7 +62,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         srv = testServer(urlQueue, parseQueue, List.empty, storeDirectory, drv)
         server <- srv._2.resource
         _ <- request(server.baseUri.renderString, EnqueueRequest("https://ipecho.net/plain", None))
-        scrapeResult <- waitForFirstEntryInStream(srv._1, 100000.milliseconds).map(_.left.get)
+        scrapeResult <- waitForFirstEntryInStream(srv._1, 20000.milliseconds).map(_.left.get)
       } yield scrapeResult.html must not(contain(requestRes))
 
       testCase.use(_ => IO.unit).unsafeRunSync()
@@ -90,6 +95,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
 
       testCase.use(_ => IO.unit).unsafeRunSync()
     }
+
 
     "record full page scrape result" in new Context {
       val testCase: Resource[IO, Unit] = for {
@@ -139,7 +145,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
       testCase.use(_ => IO.unit).unsafeRunSync()
     }
 
-    "on scrape failure" in new Context {
+    "on scrape failure, recover by retry" in new Context {
       val testCase: Resource[IO, Unit] = for {
         drv <- defaultDrivers
         urlQueue <- testQueue[EnqueueRequest]
@@ -147,7 +153,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         ref <- Resource.liftF(Ref.of[IO, Either[String, Throwable]](Left("Was not called")))
         stream = consumeLinkStreamAndProduceParseStream(urlQueue, parseQueue, drv, (error, _) => ref.set(Right(error)))
         _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRequest("https://127.0.0.1", None)))
-        res <- waitForFirstEntryInStream(stream, 10000.milliseconds).attempt
+        res <- waitForFirstEntryInStream(stream, 20000.milliseconds).attempt
         err <- Resource.liftF(ref.get)
         _ <- Resource.liftF(IO(err must beRight))
         _ <- Resource.liftF(IO(res must beLeft))
@@ -233,14 +239,19 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
 
     val storeDirectory = "testPageStorage/"
 
-    val defaultDrivers: Resource[IO, List[ScrappyDriver]] = FakeServer
-      .driverLocations.map(driverConfigs =>
-      driverConfigs._1.flatMap(ScrappyDriver(_, driverConfigs._2).toList)
-    )
-
     object RecordedAtParamMatcher extends QueryParamDecoderMatcher[Long]("recorded_at")
 
     object UrlParamMatcher extends QueryParamDecoderMatcher[String]("url")
+
+    val defaultDrivers: Resource[IO, Queue[IO, ScrappyDriver]] = Resource.liftF(for {
+      queue <- Queue.unbounded[IO, ScrappyDriver]
+      proxyEnq <- FakeServer.driverLocations
+        .map { driverConfigs =>
+          driverConfigs._1.zip(driverConfigs._2 ++ proxies)
+            .map(op => queue.enqueue1(ScrappyDriver(op._1, op._2)))
+        }
+      _ <- proxyEnq.sequence
+    } yield queue)
 
     def signalServer(urlM: String, timeM: Long, port: Option[Int] = None): Resource[IO, (String, IO[Boolean])] = {
       for {
@@ -280,9 +291,9 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
                    parseQueue: Queue[IO, EnqueueScrapeResult],
                    recorderUrls: List[String],
                    storeDirectory: String,
-                   scrappyDriver: List[ScrappyDriver],
+                   scrappyDriver: Queue[IO, ScrappyDriver],
                    token: Option[String] = None): (Stream[IO, Either[EnqueueScrapeResult, List[HttpResponse]]], BlazeServerBuilder[IO]) =
-      (combineLinkAndParseStreams(linkQueue, parseQueue, List.empty, storeDirectory, scrappyDriver, (_, _) => IO.unit), server(linkQueue, serverToken = token))
+      (combineLinkAndParseStreams(linkQueue, parseQueue, List.empty, storeDirectory, scrappyDriver, (error, _) => IO.raiseError(error)), server(linkQueue, serverToken = token))
 
     def raceWithTimeOut[A](actionToRace: IO[A], maxDuration: FiniteDuration): Resource[IO, A] = Resource.liftF[IO, A](
       IO.race(
@@ -301,7 +312,6 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
           _ => ""
         )).exec[IO]
       )
-
     }
 
     def request(baseUri: String, request: EnqueueRequest, token: Option[String] = None): Resource[IO, HttpResponse] = {

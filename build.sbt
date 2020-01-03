@@ -36,9 +36,13 @@ libraryDependencies ++= Seq(
 
   "com.github.nscala-time" %% "nscala-time" % "2.22.0",
 
+  "com.github.cb372" % "scalacache-core_2.12" % "0.28.0",
+  "com.github.cb372" % "scalacache-cats-effect_2.12" % "0.28.0",
+  "com.github.cb372" %% "scalacache-guava" % "0.28.0",
+
   "com.pepegar" %% "hammock-core" % "0.10.0",
   "com.pepegar" %% "hammock-circe" % "0.10.0",
-  "com.pepegar" %% "hammock-apache-http" % "0.10.0",
+  "com.pepegar" %% "hammock-asynchttpclient" % "0.10.0",
 
   "io.circe" %% "circe-core" % "0.12.2",
   "io.circe" %% "circe-generic" % "0.12.2",
