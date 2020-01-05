@@ -1,31 +1,36 @@
 package algimk
 
-import java.io.{BufferedWriter, File, FileWriter}
-import java.nio.file.Files
-
-import cats.effect.IO
-
-import scala.io.Source
+import java.io.File
+import cats.effect.{Blocker, ContextShift, IO}
+import fs2.Stream
+import fs2.io.file._
+import fs2.text
 
 case object FileSystem {
-  def readFile(fileName: String): IO[String] = {
-
-    IO(Source.fromFile(fileName)).bracket(
-      bf => IO(bf.getLines().mkString(""))
-    )(bf => IO(bf.close()))
+  def readFile(blocker: Blocker, fileName: String)(implicit ctxS: ContextShift[IO]): IO[String] = {
+    readAll[IO](new File(fileName).toPath, blocker, 4096)
+      .through(text.utf8Decode)
+      .through(text.lines)
+      .compile.fold("")(_ ++ _)
   }
 
-  def writeFile(fileName: String, content: String): IO[Unit] = IO.delay {
-    new BufferedWriter(new FileWriter(fileName))
-  }.bracket(bf => IO(bf.write(content)))(bf => IO(bf.close()))
+  def writeFile(blocker: Blocker, fileName: String, content: String)(implicit ctxS: ContextShift[IO]): IO[Unit] = {
+    Stream.emit[IO, String](content)
+      .through(text.utf8Encode)
+      .through(writeAll[IO](new File(fileName).toPath, blocker)
+    ).compile.drain
+  }
 
-  def createDirectoryIfNotExist(storeDirectory: String): IO[Any] = {
-    IO.delay {
-      val folderPath = new File(storeDirectory).toPath
-      if (!Files.exists(folderPath)) {
-        Files.createDirectory(folderPath)
+  def createDirectoryIfNotExist(blocker: Blocker, storeDirectory: String)(implicit ctxS: ContextShift[IO]): IO[Unit] = {
+    val path = new File(storeDirectory).toPath
+
+    exists[IO](blocker, path).flatMap(exists => {
+      if(!exists) {
+        createDirectory[IO](blocker, path).map(_ => ())
+      } else {
+        IO.unit
       }
-    }
+    })
   }
 
   def urlAsFile(url: String): Option[String] = {

@@ -42,12 +42,12 @@ trait FakeServerContext {
 object FakeServer {
   case class ServerApi(url: Uri)
 
-  def driverLocations: IO[(List[DriverConfig], List[ProxyConfig])] = for {
+  def driverLocations(implicit ctxS: ContextShift[IO]): IO[(List[DriverConfig], List[ProxyConfig])] = for {
     config <- loadConfigF[IO, Config]
     proxies <- ProxyConfig.readProxies(config.proxyConfigFileName)
   } yield (config.browserDrivers, proxies)
 
-  val defaultDriver: Resource[IO, WebDriver] = {
+  def defaultDriver(implicit ctxS: ContextShift[IO]): Resource[IO, WebDriver] = {
     Resource.liftF(driverLocations).flatMap(drv => Scrappy.driver(drv._1.map(opt => ScrappyDriver(opt)).head))
   }
 

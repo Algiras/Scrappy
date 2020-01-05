@@ -5,27 +5,30 @@ import java.io.{BufferedReader, File, FileReader}
 import algimk.Scrappy.ScrappyDriver
 import algimk.ScrappyQueue.{EnqueueRequest, _}
 import cats.effect.concurrent.Ref
-import cats.effect.{ContextShift, IO, Resource, Timer}
+import cats.effect.{Blocker, ContextShift, IO, Resource, Timer}
 import cats.implicits._
 import fs2.Stream
-import fs2.concurrent.{Queue, SignallingRef}
+import fs2.concurrent.{InspectableQueue, Queue, SignallingRef}
 import org.http4s.dsl.impl.QueryParamDecoderMatcher
+import org.http4s.server.Server
 import org.http4s.server.blaze.BlazeServerBuilder
 import org.http4s.util.CaseInsensitiveString
-import org.http4s.{HttpRoutes, Method, Request, Response, Status, Uri}
+import org.http4s.{server => _, _}
 import org.joda.time.DateTime
 import org.specs2.matcher.MatchResult
 import org.specs2.mutable.Spec
 import org.specs2.specification.Scope
 import org.http4s.client.blaze._
-
 import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
+import jawnfs2.Absorbable._
+import jawnfs2._
 
 class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends Spec{
   implicit val contextShift: ContextShift[IO] = IO.contextShift(executionContext)
   implicit val timer: Timer[IO] = IO.timer(executionContext)
+  implicit val jawnFacade = new io.circe.jawn.CirceSupportParser(None, allowDuplicateKeys = false).facade
 
   "ScrappyQueue" should {
     "record a page in scrapping queue" in new Context {
@@ -33,7 +36,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
 
       val testCase: Resource[IO, MatchResult[String]] = for {
         urlQueue <- testQueue[EnqueueRequest]
-        server <- server(urlQueue).resource
+        server <- buildServerResource(urlQueue)
         _ <- enqueueRequest(server.baseUri.renderString, EnqueueRequest(url, None))
         urlQueueHead <- waitForFirstEntryInStream(urlQueue.dequeue, 1.second)
       } yield urlQueueHead.url must_=== url
@@ -53,8 +56,8 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         requestRes <- fetchContent(pongUrl)
         urlQueue <- testQueue[EnqueueRequest]
         parseQueue <- testQueue[EnqueueScrapeResult]
-        stream = combineLinkAndParseStreams(urlQueue, parseQueue, List.empty, storeDirectory, driverQueue, (_, _) => IO.unit)
-        server <- server(urlQueue).resource
+        stream = combineLinkAndParseStreams(urlQueue, parseQueue, List.empty, storeDirectory, driverQueue.dequeue, (_, _) => IO.unit)
+        server <- buildServerResource(urlQueue)
         _ <- enqueueRequest(server.baseUri.renderString, EnqueueRequest(pongUrl, None))
         scrapeResult <- waitForFirstEntryInStream(stream, 10000.seconds).map(_.left.get)
       } yield scrapeResult.html must not(contain(requestRes))
@@ -65,7 +68,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
     "reject queue request if it's not authorized and server provides a token" in new Context {
       val testCase: Resource[IO, Unit] = for {
         urlQueue <- testQueue[EnqueueRequest]
-        server <- server(urlQueue, serverToken = Some("random-token")).resource
+        server <- buildServerResource(urlQueue, serverToken = Some("random-token"))
         req <- enqueueRequest(server.baseUri.renderString, EnqueueRequest("http://www.google.com", None)).attempt
       } yield req.map(_.code) must beRight(401)
 
@@ -75,7 +78,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
     "allow queue request if it's authorized and server provides a token that matches" in new Context {
       val testCase: Resource[IO, Unit] = for {
         urlQueue <- testQueue[EnqueueRequest]
-        server <- server(urlQueue, serverToken = Some("random-token")).resource
+        server <- buildServerResource(urlQueue, serverToken = Some("random-token"))
         req <- enqueueRequest(server.baseUri.renderString, EnqueueRequest("http://www.google.com", None), Some("random-token")).attempt
       } yield req.map(_.code) must beRight(200)
 
@@ -88,7 +91,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         drv <- defaultDrivers
         urlQueue <- testQueue[EnqueueRequest]
         parseQueue <- testQueue[EnqueueScrapeResult]
-        stream = consumeLinkStreamAndProduceParseStream(urlQueue, parseQueue, drv, (_, _) => IO.unit)
+        stream = consumeLinkStreamAndProduceParseStream(urlQueue.dequeue, urlQueue.enqueue1, parseQueue, drv.dequeue, (_, _) => IO.unit)
         urlToScrape <- FakeServer.givenFakeServer.map(srv => srv.url.renderString ++ "index.html")
         _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRequest(urlToScrape, None)))
         res <- waitForFirstEntryInStream(stream, 20.seconds)
@@ -99,12 +102,59 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
       testCase.use(_ => IO.unit).unsafeRunSync()
     }
 
+    "provide historical replay of previously recorded pages" in new Context {
+      def requestResult(uri: Uri): Resource[IO, Stream[IO, Recording]] = BlazeClientBuilder[IO](executionContext).resource.map(
+        _.stream(Request[IO](Method.GET, uri)).flatMap(res => res.body.chunks.parseJsonStream)
+          .flatMap(j => Stream.eval(IO(recordingDecoder.decodeJson(j)).rethrow))
+      )
+
+      val testCase: Resource[IO, Unit] = for {
+        drv <- defaultDrivers
+        urlQueue <- testQueue[EnqueueRequest]
+        parseQueue <- testQueue[EnqueueScrapeResult]
+        basePath <- buildServerResource(urlQueue).map(_.baseUri)
+        stream = combineLinkAndParseStreams(urlQueue, parseQueue, List.empty, storeDirectory, drv.dequeue, (_, _) => IO.raiseError(new RuntimeException("Failure to parse")))
+        urlToScrape1 <- FakeServer.givenFakeServer.map(srv => srv.url.renderString ++ "index.html")
+        urlToScrape2 <- FakeServer.givenFakeServer.map(srv => srv.url.renderString ++ "index.html")
+        _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRequest(urlToScrape1, None)))
+        _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRequest(urlToScrape2, None)))
+        recordedRes <- Resource.liftF(stream.take(4).compile.to[List].map(_.collect{ case Left(value) => value }.map(r => Recording(r.time, r.html.split('\n').mkString("")))).timeout(1000.seconds))
+        stm <- requestResult(basePath / "replay")
+        suppliedRes <- Resource.liftF(stm.take(2).compile.toList)
+        _ <- deleteRecordedFiles()
+      } yield recordedRes must containAnyOf(suppliedRes)
+
+      testCase.use(_ => IO.unit).unsafeRunSync()
+    }
+
+    "retrieve list of .html files content in the directory" in new Context {
+      val recording1 = Recording(new DateTime(), "html1")
+      val recording2 = Recording(new DateTime(), "html2")
+
+      def writeRecord(recording: Recording): IO[Unit] = Blocker[IO].use(f = ctx =>
+        FileSystem.writeFile(
+          ctx,
+          storeDirectory + recording.at.getMillis.toString + "-test.html",
+          recording.html
+        )
+      )
+
+      val testCase: IO[List[Recording]] = for {
+        _ <- writeRecord(recording1)
+        _ <- writeRecord(recording2)
+        files <- Blocker[IO].use(streamRecordings(_, new File(storeDirectory).toPath).take(2).compile.toList)
+        _ <- deleteRecordedFiles().use(IO.pure)
+      } yield files
+
+      testCase.unsafeRunSync() must contain(exactly(recording1, recording2))
+    }
+
     "consider empty page to be a scrape failure" in new Context {
       val testCase: Resource[IO, Unit] = for {
         drv <- defaultDrivers
         urlQueue <- testQueue[EnqueueRequest]
         parseQueue <- testQueue[EnqueueScrapeResult]
-        stream = consumeLinkStreamAndProduceParseStream(urlQueue, parseQueue, drv, (_, _) => IO.unit)
+        stream = consumeLinkStreamAndProduceParseStream(urlQueue.dequeue, urlQueue.enqueue1, parseQueue, drv.dequeue, (_, _) => IO.unit)
         urlToScrape <- FakeServer.givenFakeServer.map(srv => srv.url.renderString ++ "empty.html")
         _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRequest(urlToScrape, None)))
         res <- waitForFirstEntryInStream(stream, 10.seconds).attempt
@@ -120,7 +170,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         urlQueue <- testQueue[EnqueueRequest]
         parseQueue <- testQueue[EnqueueScrapeResult]
         ref <- Resource.liftF(Ref.of[IO, Either[String, Throwable]](Left("Was not called")))
-        stream = consumeLinkStreamAndProduceParseStream(urlQueue, parseQueue, drv, (error, _) => ref.set(Right(error)))
+        stream = consumeLinkStreamAndProduceParseStream(urlQueue.dequeue, urlQueue.enqueue1, parseQueue, drv.dequeue, (error, _) => ref.set(Right(error)))
         _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRequest("https://127.0.0.1", None)))
         res <- waitForFirstEntryInStream(stream, 20.seconds).attempt
         err <- Resource.liftF(ref.get)
@@ -137,7 +187,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         urlQueue <- testQueue[EnqueueRequest]
         parseQueue <- testQueue[EnqueueScrapeResult]
         ref <- Resource.liftF(Ref.of[IO, Either[String, Throwable]](Left("Was not called")))
-        stream = consumeLinkStreamAndProduceParseStream(urlQueue, parseQueue, drv, (error, _) => ref.set(Right(error)))
+        stream = consumeLinkStreamAndProduceParseStream(urlQueue.dequeue, urlQueue.enqueue1, parseQueue, drv.dequeue, (error, _) => ref.set(Right(error)))
         _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRequest("https://127.0.0.1", None)))
         res <- waitForFirstEntryInStream(stream, 20.seconds).attempt
         err <- Resource.liftF(ref.get)
@@ -154,7 +204,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
 
       val testCase: Resource[IO, Unit] = for {
         parseQueue <- testQueue[EnqueueScrapeResult]
-        stream = consumeParseStream(parseQueue, List.empty, storeDirectory)
+        stream = consumeParseStream(parseQueue.dequeue, List.empty, storeDirectory)
         _ <- Resource.liftF(parseQueue.enqueue1(EnqueueScrapeResult(EnqueueRequest(url, None), fileContentText, new DateTime())))
         _ <- waitForFirstEntryInStream(stream, 1.second)
         fileContent <- readFileContent(url)
@@ -171,7 +221,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
 
       val testCase: Resource[IO, Unit] = for {
         urlQueue <- testQueue[EnqueueRequest]
-        _ <- server(urlQueue, Some(port)).resource
+        _ <- buildServerResource(urlQueue, Some(port))
         _ <- enqueueRequest(s"http://localhost:${port}/", EnqueueRequest(url, None))
       } yield ()
 
@@ -186,7 +236,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
       val testCase: Resource[IO, Unit] = for {
         parseQueue <- testQueue[EnqueueScrapeResult]
         signalServerPair <- signalServer(url, date.getMillis)
-        stream = consumeParseStream(parseQueue, List(signalServerPair._1), storeDirectory)
+        stream = consumeParseStream(parseQueue.dequeue, List(signalServerPair._1), storeDirectory)
         _ <- Resource.liftF(parseQueue.enqueue1(EnqueueScrapeResult(EnqueueRequest(url, None), html, date)))
         _ <- waitForFirstEntryInStream(stream, 1.second)
         _ <- deleteRecordedFiles()
@@ -203,7 +253,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
 
       val testCase: Resource[IO, Unit] = for {
         parseQueue <- testQueue[EnqueueScrapeResult]
-        stream = consumeParseStream(parseQueue, List.empty, storeDirectory)
+        stream = consumeParseStream(parseQueue.dequeue, List.empty, storeDirectory)
         signalServerPair <- signalServer(url, date.getMillis)
         _ <- Resource.liftF(parseQueue.enqueue1(EnqueueScrapeResult(EnqueueRequest(url, Some(signalServerPair._1)), html, date)))
         _ <- waitForFirstEntryInStream(stream, 1.second)
@@ -216,9 +266,12 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
   }
 
   trait Context extends Scope {
-    def testQueue[T]: Resource[IO, Queue[IO, T]] = Resource.liftF(Queue.bounded[IO, T](10))
+    def testQueue[T]: Resource[IO, InspectableQueue[IO, T]] = Resource.liftF(InspectableQueue.bounded[IO, T](10))
 
     val storeDirectory = "testPageStorage/"
+
+    def buildServerResource(urlQueue: Queue[IO, EnqueueRequest], port: Option[Int] = None, serverToken: Option[String] = None): Resource[IO, Server[IO]] =
+      Blocker[IO].flatMap(ctx => server(urlQueue, ctx, new File(storeDirectory).toPath, serverToken = serverToken, port = port).resource)
 
     object RecordedAtParamMatcher extends QueryParamDecoderMatcher[Long]("recorded_at")
     object UrlParamMatcher extends QueryParamDecoderMatcher[String]("url")
