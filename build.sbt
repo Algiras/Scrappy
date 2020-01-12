@@ -28,6 +28,7 @@ val fs2Version = "2.1.0"
 val nScalaVersion = "2.22.0"
 val circeVersion = "0.12.3"
 val http4sVersion = "0.21.0-M6"
+val fuuid = "0.2.0"
 // Test library version
 val spec2Version = "4.6.0"
 // Special cases
@@ -40,6 +41,8 @@ libraryDependencies ++= Seq(
   "org.seleniumhq.selenium" % "selenium-java" % seleniumVersion,
   "org.seleniumhq.selenium" % "selenium-firefox-driver" % seleniumVersion,
   "org.seleniumhq.selenium" % "selenium-chrome-driver" % seleniumVersion,
+
+  "io.chrisdavenport" %% "fuuid"  % fuuid,
 
   "io.chrisdavenport" %% "log4cats-core" % log4CatsVersion,
   "io.chrisdavenport" %% "log4cats-slf4j" % log4CatsVersion,

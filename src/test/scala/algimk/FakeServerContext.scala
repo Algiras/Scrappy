@@ -13,6 +13,7 @@ import org.openqa.selenium.WebDriver
 import org.specs2.matcher.MatchResult
 import pureconfig.generic.auto._
 import pureconfig.module.catseffect.loadConfigF
+import java.io.File
 
 import scala.concurrent.ExecutionContext
 import scala.io.Source
@@ -42,14 +43,17 @@ trait FakeServerContext {
 object FakeServer {
   case class ServerApi(url: Uri)
 
-  def driverLocations(implicit ctxS: ContextShift[IO]): IO[(List[DriverConfig], List[ProxyConfig])] = for {
-    config <- loadConfigF[IO, Config]
-    proxies <- ProxyConfig.readProxies(config.proxyConfigFileName)
+  def driverLocations(implicit ctxS: ContextShift[IO]): Resource[IO, (List[DriverConfig], List[ProxyConfig])] = for {
+    blocker <- Blocker[IO]
+    config <- Resource.liftF(loadConfigF[IO, Config])
+    proxies <- Resource.liftF(ProxyConfig.readProxies(blocker, config.proxyConfigFileName.map(new File(_).toPath())))
   } yield (config.browserDrivers, proxies)
 
-  def defaultDriver(implicit ctxS: ContextShift[IO]): Resource[IO, WebDriver] = {
-    Resource.liftF(driverLocations).flatMap(drv => Scrappy.driver(drv._1.map(opt => ScrappyDriver(opt)).head))
-  }
+  def defaultDriver(implicit ctxS: ContextShift[IO]): Resource[IO, WebDriver] = for {
+    blocker <- Blocker[IO]
+    drv <- driverLocations
+    d <- Scrappy.driver(drv._1.map(opt => ScrappyDriver(opt)).head)
+  } yield d
 
   def loadFileResource(fileName: String) = IO(Source.fromResource(s"testPages/$fileName").getLines.mkString)
 

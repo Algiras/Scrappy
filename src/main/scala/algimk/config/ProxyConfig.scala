@@ -8,6 +8,7 @@ import io.circe.{Decoder, Encoder}
 import org.http4s.client.blaze.BlazeClientBuilder
 import org.http4s.implicits._
 import io.circe.parser.decode
+import java.nio.file._
 
 sealed trait ProxyConfig
 
@@ -22,8 +23,8 @@ object ProxyConfig {
   implicit val decodeProxyConfig: Decoder[ProxyConfig] = deriveDecoder[ProxyConfig]
   implicit val encodeProxyConfig: Encoder[ProxyConfig] = deriveEncoder[ProxyConfig]
 
-  def readProxies(fileNameOpt: Option[String])(implicit contextShift: ContextShift[IO]): IO[List[ProxyConfig]] = fileNameOpt.map(fileName =>
-    Blocker[IO].use(FileSystem.readFile(_,fileName)).map(content => decode[List[ProxyConfig]](content)).rethrow
+  def readProxies(blocker: Blocker, filePathOpt: Option[Path])(implicit contextShift: ContextShift[IO]): IO[List[ProxyConfig]] = filePathOpt.map(filePath =>
+    FileSystem.readFile(blocker, filePath).compile.fold("")(_ ++ _).map(content => decode[List[ProxyConfig]](content)).rethrow
   ).getOrElse(IO(List.empty[ProxyConfig]))
 
   def getProxyScrapeProxies(implicit ctxS: ContextShift[IO]): IO[List[SSLProxy]] = {

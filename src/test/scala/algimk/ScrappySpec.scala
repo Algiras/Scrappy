@@ -12,8 +12,8 @@ import org.specs2.specification.Scope
 import scala.concurrent.ExecutionContext
 
 class ScrappySpec(implicit val executionContext: ExecutionContext) extends Spec with FakeServerContext {
-  implicit val contextShift: ContextShift[IO] = IO.contextShift(executionContext)
-  implicit val timer: Timer[IO] = IO.timer(executionContext)
+  implicit def contextShift: ContextShift[IO] = IO.contextShift(executionContext)
+  implicit def timer: Timer[IO] = IO.timer(executionContext)
 
   "Scrappy" should {
     "read page body" in new Context {
