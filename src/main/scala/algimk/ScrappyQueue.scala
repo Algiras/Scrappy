@@ -40,9 +40,9 @@ object ScrappyQueue extends IOApp {
     )
   }
 
-  def consumeLinkStreamAndProduceParseStream(linkStream: Stream[IO, EnqueueRequest],
-                                             linkEnqueue: EnqueueRequest => IO[Unit],
-                                             parseQueue: Queue[IO, EnqueueScrapeResult],
+  def consumeLinkStreamAndProduceParseStream(linkStream: Stream[IO, EnqueueRetryRequest],
+                                             linkEnqueue: EnqueueRetryRequest => IO[Unit],
+                                             recordParseResult: EnqueueScrapeResult => IO[Unit],
                                              scrappyDriverQueue: Stream[IO, ScrappyDriver],
                                              reportError: (Throwable, String) => IO[Unit]): Stream[IO, EnqueueScrapeResult] = {
     scrappyDriverQueue.zip(linkStream).evalMap {
@@ -51,8 +51,11 @@ object ScrappyQueue extends IOApp {
         time <- timer.clock.realTime(MILLISECONDS).map(new DateTime(_))
         result = parsedHtml.map(EnqueueScrapeResult(req, _, time))
         _ <- result.fold(
-          reportError(_, s"Failure scrapping page ${req.url}").flatMap(_ => linkEnqueue(req)),
-          parseQueue.enqueue1
+          req.retryCount match {
+            case count if count < 1 => reportError(_, s"Failure scrapping page ${req.url} after retrying")
+            case _ => reportError(_, s"Failure scrapping page ${req.url}").flatMap(_ => linkEnqueue(req.copy(retryCount = req.retryCount - 1)))
+          },
+          recordParseResult
         )
       } yield result
     }.collect { case Right(value) => value }
@@ -101,13 +104,13 @@ object ScrappyQueue extends IOApp {
       config <- loadConfigF[IO, Config]
       logger <- Slf4jLogger.create[IO]
       proxies <- (ProxyConfig.readProxies(blocker, (config.proxyConfigFileName).map(new File(_).toPath)))
-      linkQueue <- Queue.bounded[IO, EnqueueRequest](config.queueBounds.linkQueueBound)
+      linkQueue <- Queue.bounded[IO, EnqueueRetryRequest](config.queueBounds.linkQueueBound)
       parseQueue <- Queue.bounded[IO, EnqueueScrapeResult](config.queueBounds.parseQueueBound)
       driverQueue <- Queue.unbounded[IO, ScrappyDriver]
       _ <- FileSystem.createDirectoryIfNotExist(blocker, new File(config.storeDirectory).toPath)
-      configuredServer = ScrappyServer.create(linkQueue.enqueue1, Some(config.http.port), config.token, FileSystem.streamRecordings(blocker, new File(config.storeDirectory).toPath))
+      configuredServer = ScrappyServer.create(linkQueue.enqueue1, Some(config.http.port), config.token, FileSystem.streamRecordings(blocker, new File(config.storeDirectory).toPath), PositiveNumber(3))
       populateDrivers = enqueueScrappyDrivers(config.browserDrivers, proxies, driverQueue.enqueue1)
-      linkStream = consumeLinkStreamAndProduceParseStream(linkQueue.dequeue, linkQueue.enqueue1, parseQueue, driverQueue.dequeue, (error, msg) => logger.error(error)(msg))
+      linkStream = consumeLinkStreamAndProduceParseStream(linkQueue.dequeue, linkQueue.enqueue1, parseQueue.enqueue1, driverQueue.dequeue, (error, msg) => logger.error(error)(msg))
       parseStream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk("history", config.storeDirectory, blocker), config.subscribers)
       exitCode <- Stream(
         linkStream,

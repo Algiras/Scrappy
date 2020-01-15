@@ -7,6 +7,7 @@ import org.http4s.{EntityDecoder, EntityEncoder}
 import org.http4s.circe.{jsonEncoderOf, jsonOf}
 
 case class EnqueueRequest(url: String, callbackUrl: Option[String])
+case class EnqueueRetryRequest(url: String, callbackUrl: Option[String], retryCount: Int)
 
 object EnqueueRequest {
   implicit private val enqueueEncoder: Encoder[EnqueueRequest] = deriveEncoder

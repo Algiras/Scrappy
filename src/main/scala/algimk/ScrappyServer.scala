@@ -15,8 +15,8 @@ import cats.effect.Timer
 object ScrappyServer {
   object OptionalTokenParamMatcher extends OptionalQueryParamDecoderMatcher[String]("token")
 
-  def create(recordLink: EnqueueRequest => IO[Unit], port: Option[Int] = None, serverToken: Option[String] = None,
-             recordingStream: Stream[IO, Recording])(implicit tm: Timer[IO], ctx: ContextShift[IO]): BlazeServerBuilder[IO] = {
+  def create(recordLink: EnqueueRetryRequest => IO[Unit], port: Option[Int] = None, serverToken: Option[String] = None,
+             recordingStream: Stream[IO, Recording], retryCount: Option[PositiveNumber])(implicit tm: Timer[IO], ctx: ContextShift[IO]): BlazeServerBuilder[IO] = {
 
     BlazeServerBuilder[IO]
       .bindHttp(port.getOrElse(0))
@@ -25,7 +25,7 @@ object ScrappyServer {
           if (serverToken.forall(tk => token.contains(tk))) {
             req.as[EnqueueRequest]
               .flatMap(body =>
-                recordLink(body).map(_ => Response(Status.Ok))
+                recordLink(EnqueueRetryRequest(body.url, body.callbackUrl, retryCount.map(_.value).getOrElse(0))).map(_ => Response(Status.Ok))
               )
           } else IO.pure(Response(Unauthorized))
         case GET -> Root / "replay" => Ok(recordingStream)
