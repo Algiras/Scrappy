@@ -13,18 +13,16 @@ import model._
 import io.circe.syntax._
 
 case object FileSystem {
-  def readFile(blocker: Blocker, filePath: Path)(implicit ctxS: ContextShift[IO]): Stream[IO, String] = {
+  def readFile(blocker: Blocker, filePath: Path)(implicit ctxS: ContextShift[IO]): Stream[IO, String] =
     readAll[IO](filePath, blocker, 4096).through(text.utf8Decode)
-  }
 
-  def writeFile(blocker: Blocker, filePath: Path, content: String)(implicit ctxS: ContextShift[IO]): IO[Unit] = {
+  def writeFile(blocker: Blocker, filePath: Path, content: String)(implicit ctxS: ContextShift[IO]): IO[Unit] =
     Stream.emit[IO, String](content)
       .through(text.utf8Encode)
       .through(writeAll[IO](filePath, blocker)
     ).compile.drain
-  }
 
-  def createDirectoryIfNotExist(blocker: Blocker, storeDirectory: Path)(implicit ctxS: ContextShift[IO]): IO[Unit] = {
+  def createDirectoryIfNotExist(blocker: Blocker, storeDirectory: Path)(implicit ctxS: ContextShift[IO]): IO[Unit] =
     exists[IO](blocker, storeDirectory).flatMap(exists => {
       if(!exists) {
         createDirectory[IO](blocker, storeDirectory).map(_ => ())
@@ -32,26 +30,8 @@ case object FileSystem {
         IO.unit
       }
     })
-  }
 
-  def urlAsFile(url: String): Option[String] = {
-    val parsedUrl = url
-      .replace('.', '_')
-      .replace('/', '_')
-      .replace(':', '_')
-      .replaceAll("_+", "_")
-      .trim
-
-    if (parsedUrl.nonEmpty) {
-      Some(parsedUrl ++ ".html")
-    } else {
-      None
-    }
-  }
-
-
-  def streamRecordings(blocker: Blocker, path: Path)(implicit ctx: ContextShift[IO]): Stream[IO, Recording] = {
-    readAll[IO](path, blocker, 4096)
+  def streamRecordings(blocker: Blocker, path: Path)(implicit ctx: ContextShift[IO]): Stream[IO, Recording] = readAll[IO](path, blocker, 4096)
       .through(text.utf8Decode)
       .through(text.lines)
       .evalMap(content => IO.fromEither(decode[HistoryRecording](content)))
@@ -64,11 +44,10 @@ case object FileSystem {
 
         fileContent.map(Recording(res.at, res.callbackUrl, res.url, _))
       })
-  }
 
-  def persistToDisk(historyName: String, storeDirectory: String, blocker: Blocker)(res: EnqueueScrapeResult)(implicit ctx: ContextShift[IO]): IO[Unit] =
+  def persistToDisk(historyName: String, genFileName: IO[String], storeDirectory: String, blocker: Blocker)(res: EnqueueScrapeResult)(implicit ctx: ContextShift[IO]): IO[Unit] =
     for {
-      fileName <- IO.fromEither(FileSystem.urlAsFile(res.request.url).toRight(throw new RuntimeException("Can't parse file name")))
+      fileName <- genFileName
       _ <- FileSystem.writeFile(blocker, new File(storeDirectory ++ fileName).toPath, res.html)
       _ <- Resource.fromAutoCloseable(IO(new FileWriter(storeDirectory ++ historyName, true))).use(
         fw => blocker.blockOn(IO(fw.append(HistoryRecording(

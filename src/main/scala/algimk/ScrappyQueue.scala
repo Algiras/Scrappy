@@ -19,6 +19,7 @@ import pureconfig.module.catseffect._
 import model._
 import fs2.Stream
 import org.http4s.client.Client
+import io.chrisdavenport.fuuid.FUUID
 
 import scala.concurrent.duration._
 
@@ -111,7 +112,7 @@ object ScrappyQueue extends IOApp {
       configuredServer = ScrappyServer.create(linkQueue.enqueue1, Some(config.http.port), config.token, FileSystem.streamRecordings(blocker, new File(config.storeDirectory).toPath), PositiveNumber(3))
       populateDrivers = enqueueScrappyDrivers(config.browserDrivers, proxies, driverQueue.enqueue1)
       linkStream = consumeLinkStreamAndProduceParseStream(linkQueue.dequeue, linkQueue.enqueue1, parseQueue.enqueue1, driverQueue.dequeue, (error, msg) => logger.error(error)(msg))
-      parseStream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk("history", config.storeDirectory, blocker), config.subscribers)
+      parseStream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk("history", FUUID.randomFUUID[IO].map(_.show + ".html"), config.storeDirectory, blocker), config.subscribers)
       exitCode <- Stream(
         linkStream,
         parseStream,

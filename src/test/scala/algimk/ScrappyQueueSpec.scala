@@ -125,11 +125,13 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         blocker <- Blocker[IO]
         drv <- defaultDrivers
         historyName <- givenId
+        nameQueue <- testQueue[String]
+        _ <- Resource.liftF(nameQueue.enqueue1("file1.html").flatMap(_ => nameQueue.enqueue1("file2.html")))
         urlQueue <- testQueue[EnqueueRetryRequest]
         parseQueue <- testQueue[EnqueueScrapeResult]
         basePath <- buildServerResource(historyName, urlQueue.enqueue1).map(_.baseUri)
         client <- BlazeClientBuilder[IO](blocker.blockingContext).resource
-        stream = combineLinkAndParseStreams(blocker, client, urlQueue, parseQueue, FileSystem.persistToDisk(historyName, storeDirectory, blocker), List.empty, storeDirectory, drv, (_, _) => IO.raiseError(new RuntimeException("Failure to parse")))
+        stream = combineLinkAndParseStreams(blocker, client, urlQueue, parseQueue, FileSystem.persistToDisk(historyName, nameQueue.dequeue1, storeDirectory, blocker), List.empty, storeDirectory, drv, (_, _) => IO.raiseError(new RuntimeException("Failure to parse")))
         urlToScrape1 <- FakeServer.givenFakeServer.map(srv => srv.url.renderString ++ "index.html")
         urlToScrape2 <- FakeServer.givenFakeServer.map(srv => srv.url.renderString ++ "index.html")
         _ <- Resource.liftF(urlQueue.enqueue1(EnqueueRetryRequest(urlToScrape1, None, 1)))
@@ -217,15 +219,17 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
       val url = "http://www.google.com"
       val fileContentText = "html"
 
+      val fileName = "name.html"
+
       val testCase: Resource[IO, Unit] = for {
         blocker <- Blocker[IO]
         parseQueue <- testQueue[EnqueueScrapeResult]
         historyName <- givenId
         client <- BlazeClientBuilder[IO](blocker.blockingContext).resource
-        stream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk(historyName, storeDirectory, blocker), List.empty)
+        stream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk(historyName, IO.pure(fileName), storeDirectory, blocker), List.empty)
         _ <- Resource.liftF(parseQueue.enqueue1(EnqueueScrapeResult(EnqueueRetryRequest(url, None, 1), fileContentText, new DateTime())))
         _ <- waitForFirstEntryInStream(stream, 1.second)
-        fileContent <- readFileContent(url)
+        fileContent <- readFileContent(fileName)
         _ <- Resource.liftF(IO(fileContentText must_=== fileContent))
         _ <- deleteRecordedFiles(historyName)
       } yield ()
@@ -258,7 +262,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         historyName <- givenId
         signalServerPair <- signalServer(url, date.getMillis)
         client <- BlazeClientBuilder[IO](blocker.blockingContext).resource
-        stream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk(historyName, storeDirectory, blocker), List(signalServerPair._1))
+        stream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk(historyName, IO.pure("file.html"),storeDirectory, blocker), List(signalServerPair._1))
         _ <- Resource.liftF(parseQueue.enqueue1(EnqueueScrapeResult(EnqueueRetryRequest(url, None, 1), html, date)))
         _ <- waitForFirstEntryInStream(stream, 1.second)
         _ <- deleteRecordedFiles(historyName)
@@ -278,7 +282,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         parseQueue <- testQueue[EnqueueScrapeResult]
         historyName <- givenId
         client <- BlazeClientBuilder[IO](blocker.blockingContext).resource
-        stream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk(historyName, storeDirectory, blocker), List.empty)
+        stream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk(historyName, IO.pure("filename.html"), storeDirectory, blocker), List.empty)
         signalServerPair <- signalServer(url, date.getMillis)
         _ <- Resource.liftF(parseQueue.enqueue1(EnqueueScrapeResult(EnqueueRetryRequest(url, Some(signalServerPair._1), 1), html, date)))
         _ <- waitForFirstEntryInStream(stream, 1.second)
@@ -353,9 +357,8 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
       } yield (srv, ref.get)
     }
 
-    def readFileContent(urlToScrape: String): Resource[IO, String] = {
+    def readFileContent(fileName: String): Resource[IO, String] = {
       Resource.make(IO.delay {
-        val fileName = FileSystem.urlAsFile(urlToScrape).getOrElse(throw new RuntimeException("Can't parse file name"))
         val file = new File(storeDirectory).listFiles().toList.find(_.getName.contains(fileName)).getOrElse(throw new RuntimeException("Can't find file in directory"))
         new BufferedReader(new FileReader(file))
       })(fr => IO(fr.close())).map(_.lines().iterator().asScala.mkString("\n"))
