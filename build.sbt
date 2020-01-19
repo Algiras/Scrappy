@@ -24,11 +24,12 @@ val logbackVersion = "1.2.3"
 val pureConfigVersion = "0.12.2"
 val catsVersion = "2.0.0"
 val catsEffectVersion = "2.0.0"
-val fs2Version = "2.1.0"
+val fs2Version = "2.0.1"
 val nScalaVersion = "2.22.0"
 val circeVersion = "0.12.3"
-val http4sVersion = "0.21.0-M6"
-val fuuid = "0.2.0"
+val http4sVersion = "0.21.0-M5"
+val tsecVersion = "0.2.0-M2"
+val fuuid = "0.3.0-M5"
 // Test library version
 val spec2Version = "4.6.0"
 // Special cases
@@ -74,7 +75,9 @@ libraryDependencies ++= Seq(
   "org.http4s" %% "http4s-blaze-client" % http4sVersion,
   "org.http4s" %% "http4s-client" % http4sVersion,
 
-  "org.specs2" %% "specs2-core" % spec2Version % "test"
+  "io.github.jmcardon" %% "tsec-http4s" % tsecVersion,
+
+    "org.specs2" %% "specs2-core" % spec2Version % "test"
 )
 
 addCompilerPlugin("org.spire-math" %% "kind-projector" % kindProjector)

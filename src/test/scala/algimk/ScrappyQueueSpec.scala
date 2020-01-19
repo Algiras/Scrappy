@@ -4,6 +4,7 @@ import java.io.{BufferedReader, File, FileReader}
 
 import algimk.Scrappy.ScrappyDriver
 import ScrappyQueue._
+import algimk.ScrappyServer.{AuthUser, UserLogin}
 import model._
 import cats.effect.concurrent.Ref
 import cats.effect.{Blocker, ContextShift, IO, Resource, Timer}
@@ -30,6 +31,9 @@ import io.circe.parser.decode
 import cats.effect.IO
 import io.chrisdavenport.fuuid.FUUID
 import org.http4s.client.Client
+import tsec.authentication.TSecBearerToken
+import tsec.common.SecureRandomId
+import tsec.passwordhashers.jca._
 
 class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends Spec {
   val storeDirectory = "testPageStorage/"
@@ -79,9 +83,12 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
 
     "reject queue request if it's not authorized and server provides a token" in new Context {
       val testCase: Resource[IO, Unit] = for {
+        id <- Resource.liftF(FUUID.randomFUUID[IO])
+        user <- Resource.liftF(BCrypt.hashpw[IO]("password").map(psw => ScrappyServer.AuthUser("username", psw)))
         urlQueue <- testQueue[EnqueueRetryRequest]
         historyName <- givenId
-        server <- buildServerResource(historyName, urlQueue.enqueue1, serverToken = Some("random-token"))
+        server <- buildServerResource(historyName, urlQueue.enqueue1, users = Map(id -> user))
+        token <- login(server.baseUri.renderString, UserLogin(user.username, user.password))
         req <- enqueueRequest(server.baseUri.renderString, EnqueueRequest("http://www.google.com", None)).attempt
       } yield req.map(_.code) must beRight(401)
 
@@ -90,10 +97,13 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
 
     "allow queue request if it's authorized and server provides a token that matches" in new Context {
       val testCase: Resource[IO, Unit] = for {
+        id <- Resource.liftF(FUUID.randomFUUID[IO])
+        user <- Resource.liftF(BCrypt.hashpw[IO]("password").map(psw => ScrappyServer.AuthUser("username", psw)))
         urlQueue <- testQueue[EnqueueRetryRequest]
         historyName <- givenId
-        server <- buildServerResource(historyName, urlQueue.enqueue1, serverToken = Some("random-token"))
-        req <- enqueueRequest(server.baseUri.renderString, EnqueueRequest("http://www.google.com", None), Some("random-token")).attempt
+        server <- buildServerResource(historyName, urlQueue.enqueue1, users = Map(id -> user))
+        token <- login(server.baseUri.renderString, UserLogin(user.username, user.password))
+        req <- enqueueRequest(server.baseUri.renderString, EnqueueRequest("http://www.google.com", None), Some(token)).attempt
       } yield req.map(_.code) must beRight(200)
 
       testCase.use(_ => IO.unit).unsafeRunSync()
@@ -204,7 +214,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         urlQueue <- Resource.liftF(IO(Stream(List(
           EnqueueRetryRequest("https://127.0.0.1", None, 1),
           EnqueueRetryRequest("https://127.0.0.1", None, 0)
-        ) : _*).covary[IO]))
+        ): _*).covary[IO]))
         stream = consumeLinkStreamAndProduceParseStream(urlQueue, resultQueue.enqueue1, _ => IO.unit, drv, (_, text) => logQueue.enqueue1(text))
         _ <- Resource.liftF(stream.interruptWhen(logQueue.size.map(_ == 2)).compile.drain.timeout(20.seconds))
         enqueueResult <- Resource.liftF(resultQueue.dequeue.take(1).compile.toList)
@@ -262,7 +272,7 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
         historyName <- givenId
         signalServerPair <- signalServer(url, date.getMillis)
         client <- BlazeClientBuilder[IO](blocker.blockingContext).resource
-        stream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk(historyName, IO.pure("file.html"),storeDirectory, blocker), List(signalServerPair._1))
+        stream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk(historyName, IO.pure("file.html"), storeDirectory, blocker), List(signalServerPair._1))
         _ <- Resource.liftF(parseQueue.enqueue1(EnqueueScrapeResult(EnqueueRetryRequest(url, None, 1), html, date)))
         _ <- waitForFirstEntryInStream(stream, 1.second)
         _ <- deleteRecordedFiles(historyName)
@@ -318,16 +328,19 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
     def buildServerResource(historyName: String,
                             urlQueue: EnqueueRetryRequest => IO[Unit],
                             port: Option[Int] = None,
-                            serverToken: Option[String] = None): Resource[IO, Server[IO]] =
-      Blocker[IO].flatMap((ctx: Blocker) =>
-        ScrappyServer.create(
-          recordLink = urlQueue,
-          serverToken = serverToken,
-          port = port,
-          recordingStream = FileSystem.streamRecordings(ctx, new File(storeDirectory ++ historyName).toPath),
-          retryCount = None
-        ).resource
-      )
+                            users: Map[FUUID, AuthUser] = Map.empty): Resource[IO, Server[IO]] = for {
+      ctx <- Blocker[IO]
+      tokens <- Resource.liftF(Ref.of[IO, Map[SecureRandomId, TSecBearerToken[FUUID]]](Map.empty[SecureRandomId, TSecBearerToken[FUUID]]))
+      server <- ScrappyServer.create(
+        recordLink = urlQueue,
+        port = port,
+        users = users,
+        recordingStream = FileSystem.streamRecordings(ctx, new File(storeDirectory ++ historyName).toPath),
+        retryCount = None,
+        secretKey = "secret",
+        bearerTokens = tokens
+      ).resource
+    } yield server
 
     object RecordedAtParamMatcher extends QueryParamDecoderMatcher[Long]("recorded_at")
 
@@ -400,13 +413,24 @@ class ScrappyQueueSpec(implicit val executionContext: ExecutionContext) extends 
     def fetchContent(url: String): Resource[IO, String] =
       BlazeClientBuilder[IO](executionContext).resource.flatMap(client => Resource.liftF(client.expect[String](url)))
 
+    def login(baseUri: String, request: UserLogin): Resource[IO, String] = {
+      Resource.liftF(IO.fromEither(Uri.fromString(baseUri ++ "login"))).flatMap(uri =>
+        BlazeClientBuilder[IO](executionContext).resource.flatMap(client => Resource.liftF(client.fetch[String](Request[IO](
+          Method.POST,
+          uri,
+          body = ScrappyServer.userLoginEntityEncoder.toEntity(request).body
+        ))(res => res.as[String]))))
+    }
+
     def enqueueRequest(baseUri: String, request: EnqueueRequest, token: Option[String] = None): Resource[IO, Status] = {
       Resource.liftF(IO.fromEither(Uri.fromString(baseUri ++ "enqueue"))).flatMap(uri =>
         BlazeClientBuilder[IO](executionContext).resource.flatMap(client => Resource.liftF(client.fetch[Status](Request[IO](
           Method.POST,
-          uri.withOptionQueryParam("token", token),
+          uri,
+          headers = token.map(tk => Headers.of(Header("Authorization", s"Bearer $tk"))).getOrElse(Headers.empty),
           body = EnqueueRequest.enqueueRequestEntityEncoder.toEntity(request).body
         ))(res => IO(res.status)))))
     }
   }
+
 }

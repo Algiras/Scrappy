@@ -3,8 +3,10 @@ package algimk
 import java.io.File
 
 import algimk.Scrappy.ScrappyDriver
+import algimk.ScrappyServer.AuthUser
 import algimk.config.{Config, DriverConfig, ProxyConfig}
-import cats.effect.{IOApp, IO, ExitCode, Blocker}
+import cats.effect.concurrent.Ref
+import cats.effect.{Blocker, ExitCode, IO, IOApp}
 import cats.instances.list._
 import cats.syntax.functor._
 import cats.syntax.monadError._
@@ -20,6 +22,9 @@ import model._
 import fs2.Stream
 import org.http4s.client.Client
 import io.chrisdavenport.fuuid.FUUID
+import tsec.authentication.TSecBearerToken
+import tsec.common.SecureRandomId
+import tsec.passwordhashers.jca._
 
 import scala.concurrent.duration._
 
@@ -109,7 +114,17 @@ object ScrappyQueue extends IOApp {
       parseQueue <- Queue.bounded[IO, EnqueueScrapeResult](config.queueBounds.parseQueueBound)
       driverQueue <- Queue.unbounded[IO, ScrappyDriver]
       _ <- FileSystem.createDirectoryIfNotExist(blocker, new File(config.storeDirectory).toPath)
-      configuredServer = ScrappyServer.create(linkQueue.enqueue1, Some(config.http.port), config.token, FileSystem.streamRecordings(blocker, new File(config.storeDirectory).toPath), PositiveNumber(3))
+      users <- config.users.map(usr => FUUID.randomFUUID[IO].flatMap(id => BCrypt.hashpw[IO](usr.password).map(id -> AuthUser(usr.username, _)))).sequence.map(_.toMap)
+      tokens <- Ref.of[IO, Map[SecureRandomId, TSecBearerToken[FUUID]]](Map.empty[SecureRandomId, TSecBearerToken[FUUID]])
+      configuredServer = ScrappyServer.create(
+        recordLink = linkQueue.enqueue1,
+        port = Some(config.http.port),
+        users = users,
+        recordingStream = FileSystem.streamRecordings(blocker, new File(config.storeDirectory).toPath),
+        retryCount = PositiveNumber(3),
+        secretKey = config.secretKey,
+        bearerTokens = tokens
+      )
       populateDrivers = enqueueScrappyDrivers(config.browserDrivers, proxies, driverQueue.enqueue1)
       linkStream = consumeLinkStreamAndProduceParseStream(linkQueue.dequeue, linkQueue.enqueue1, parseQueue.enqueue1, driverQueue.dequeue, (error, msg) => logger.error(error)(msg))
       parseStream = consumeParseStream(client, parseQueue.dequeue, FileSystem.persistToDisk("history", FUUID.randomFUUID[IO].map(_.show + ".html"), config.storeDirectory, blocker), config.subscribers)
